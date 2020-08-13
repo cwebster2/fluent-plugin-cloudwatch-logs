@@ -21,7 +21,10 @@ module Fluent::Plugin
     config_param :endpoint, :string, default: nil
     config_param :tag, :string
     config_param :log_group_name, :string
-    config_param :log_stream_name, :string, default: nil
+    config_param :add_log_group_name, :bool, default: false
+    config_param :log_group_name_key, :string, default: 'log_group'
+    config_param :use_log_group_name_prefix, :bool, default: false
+    config_param :log_stream_name, :string, :default => nil
     config_param :use_log_stream_name_prefix, :bool, default: false
     config_param :state_file, :string, default: nil,
                  deprecated: "Use <stroage> instead."
@@ -118,20 +121,20 @@ module Fluent::Plugin
       end
     end
 
-    def migrate_state_file_to_storage(log_stream_name)
-      @next_token_storage.put(:"#{state_key_for(log_stream_name)}", File.read(state_key_for(log_stream_name)).chomp)
-      File.delete(state_key_for(log_stream_name))
+    def state_file_for(log_group_name, log_stream_name)
+      return "#{@state_file}_#{log_group_name.gsub(File::SEPARATOR, '-')}_#{log_stream_name.gsub(File::SEPARATOR, '-')}"
+      # return @state_file
     end
 
-    def next_token(log_stream_name)
-      if @next_token_storage.persistent && File.exist?(state_key_for(log_stream_name))
-        migrate_state_file_to_storage(log_stream_name)
+    def next_token(log_group_name, log_stream_name)
+      return nil unless File.exist?(state_file_for(log_group_name, log_stream_name))
+      File.read(state_file_for(log_group_name, log_stream_name)).chomp
+    end
+
+    def store_next_token(token, log_group_name, log_stream_name)
+      open(state_file_for(log_group_name, log_stream_name), 'w') do |f|
+        f.write token
       end
-      @next_token_storage.get(:"#{state_key_for(log_stream_name)}")
-    end
-
-    def store_next_token(token, log_stream_name = nil)
-      @next_token_storage.put(:"#{state_key_for(log_stream_name)}", token)
     end
 
     def run
@@ -141,42 +144,34 @@ module Fluent::Plugin
         if Time.now > @next_fetch_time
           @next_fetch_time += @fetch_interval
 
-          if @use_log_stream_name_prefix || @use_todays_log_stream
-            log_stream_name_prefix = @use_todays_log_stream ? get_todays_date : @log_stream_name
-            begin
-              log_streams = describe_log_streams(log_stream_name_prefix)
-              log_streams.concat(describe_log_streams(get_yesterdays_date)) if @use_todays_log_stream
-              log_streams.each do |log_stream|
-                log_stream_name = log_stream.log_stream_name
-                events = get_events(log_stream_name)
-                metadata = if @include_metadata
-                             {
-                               "log_stream_name" => log_stream_name,
-                               "log_group_name" => @log_group_name
-                             }
-                           else
-                             {}
-                           end
-                events.each do |event|
-                  emit(log_stream_name, event, metadata)
-                end
-              end
-            rescue Aws::CloudWatchLogs::Errors::ResourceNotFoundException
-              log.warn "'#{@log_stream_name}' prefixed log stream(s) are not found"
-              next
-            end
+          if @use_log_group_name_prefix
+            log_group_names = describe_log_groups(@log_group_name).map{|log_group| log_group.log_group_name}
           else
-            events = get_events(@log_stream_name)
-            metadata = if @include_metadata
-                          {
-                            "log_stream_name" => @log_stream_name,
-                            "log_group_name" => @log_group_name
-                          }
-                        else
-                          {}
-                        end
-            events.each do |event|
-              emit(log_stream_name, event, metadata)
+            log_group_names = [@log_group_name]
+          end
+
+          log_group_names.each do |log_group_name|
+            if @use_log_stream_name_prefix || @use_todays_log_stream
+              log_stream_name_prefix = @use_todays_log_stream ? get_todays_date : @log_stream_name
+              begin
+                log_streams = describe_log_streams(log_group_name, log_stream_name_prefix)
+                log_streams.concat(describe_log_streams(log_group_name, get_yesterdays_date)) if @use_todays_log_stream
+                log_streams.each do |log_stream|
+                  log_stream_name = log_stream.log_stream_name
+                  events = get_events(log_group_name, log_stream_name)
+                  events.each do |event|
+                    emit(log_group_name, log_stream_name, event)
+                  end
+                end
+              rescue Aws::CloudWatchLogs::Errors::ResourceNotFoundException
+                log.warn "'#{log_group_name}' '#{log_stream_name}' prefixed log stream(s) are not found"
+                next
+              end
+            else
+              events = get_events(log_group_name, @log_stream_name)
+              events.each do |event|
+                emit(log_group_name, log_stream_name, event)
+              end
             end
           end
         end
@@ -184,24 +179,26 @@ module Fluent::Plugin
       end
     end
 
-    def emit(stream, event, metadata)
+    def emit(group, stream, event)
       if @parser
-        @parser.parse(event.message) {|time,record|
+        @parser.parse(event.message) {|time, record|
+          if @add_log_group_name
+            record[@log_group_name_key] = group
+          end
           if @use_aws_timestamp
             time = (event.timestamp / 1000).floor
           end
-          unless metadata.empty?
-            record.merge!("metadata" => metadata)
-          end
+
           router.emit(@tag, time, record)
         }
       else
+        if @add_log_group_name
+          record[@log_group_name_key] = group
+        end
+
         time = (event.timestamp / 1000).floor
         begin
           record = @json_handler.load(event.message)
-          unless metadata.empty?
-            record.merge!("metadata" => metadata)
-          end
           router.emit(@tag, time, record)
         rescue JSON::ParserError, Yajl::ParseError => error # Catch parser errors
           log.error "Invalid JSON encountered while parsing event.message"
@@ -210,56 +207,54 @@ module Fluent::Plugin
       end
     end
 
-    def get_events(log_stream_name)
-      throttling_handler('get_log_events') do
-        request = {
-          log_group_name: @log_group_name,
-          log_stream_name: log_stream_name
-        }
-        request.merge!(start_time: @start_time) if @start_time
-        request.merge!(end_time: @end_time) if @end_time
-        log_next_token = next_token(log_stream_name)
-        request[:next_token] = log_next_token if !log_next_token.nil? && !log_next_token.empty?
-        response = @logs.get_log_events(request)
-        if valid_next_token(log_next_token, response.next_forward_token)
-          store_next_token(response.next_forward_token, log_stream_name)
-        end
+    def get_events(log_group_name, log_stream_name)
+      request = {
+        log_group_name: log_group_name,
+        log_stream_name: log_stream_name
+      }
+      log_next_token = next_token(log_group_name, log_stream_name)
+      request[:next_token] = log_next_token if !log_next_token.nil? && !log_next_token.empty?
+      response = @logs.get_log_events(request)
+      if valid_next_token(log_next_token, response.next_forward_token)
+        store_next_token(response.next_forward_token, log_group_name, log_stream_name)
+      end
 
         response.events
       end
     end
 
-    def describe_log_streams(log_stream_name_prefix, log_streams = nil, next_token = nil)
-      throttling_handler('describe_log_streams') do
-        request = {
-          log_group_name: @log_group_name
-        }
-        request[:next_token] = next_token if next_token
-        request[:log_stream_name_prefix] = log_stream_name_prefix if log_stream_name_prefix
-        response = @logs.describe_log_streams(request)
-        if log_streams
-          log_streams.concat(response.log_streams)
-        else
-          log_streams = response.log_streams
-        end
-        if response.next_token
-          log_streams = describe_log_streams(log_stream_name_prefix, log_streams, response.next_token)
-        end
-        log_streams
+    def describe_log_streams(log_group_name, log_stream_name_prefix, log_streams = nil, next_token = nil)
+      request = {
+        log_group_name: log_group_name
+      }
+      request[:next_token] = next_token if next_token
+      request[:log_stream_name_prefix] = log_stream_name_prefix
+      response = @logs.describe_log_streams(request)
+      if log_streams
+        log_streams.concat(response.log_streams)
+      else
+        log_streams = response.log_streams
+      end
+      if response.next_token
+        log_streams = describe_log_streams(log_group_name, log_stream_name_prefix, log_streams, response.next_token)
       end
     end
 
-    def throttling_handler(method_name)
-      yield
-    rescue Aws::CloudWatchLogs::Errors::ThrottlingException => err
-      if throttling_retry_seconds
-        log.warn "ThrottlingException #{method_name}. Waiting #{throttling_retry_seconds} seconds to retry."
-        sleep throttling_retry_seconds
-
-        throttling_handler(method_name) { yield }
+    def describe_log_groups(log_group_name_prefix, log_groups = nil, next_token = nil)
+      request = {
+        log_group_name_prefix: log_group_name_prefix
+      }
+      request[:next_token] = next_token if next_token
+      response = @logs.describe_log_groups(request)
+      if log_groups
+        log_groups.concat(response.log_groups)
       else
-        raise err
+        log_groups = response.log_groups
       end
+      if response.next_token
+        log_groups = describe_log_groups(log_group_name_prefix, log_groups, response.next_token)
+      end
+      log_groups
     end
 
     def valid_next_token(prev_token, next_token)

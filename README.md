@@ -6,11 +6,10 @@
 
 ## Requirements
 
-|fluent-plugin-cloudwatch-logs|     fluentd      |  ruby  |
-|-----------------------------|------------------|--------|
-|     >= 0.8.0                | >= 1.8.0         | >= 2.4 |
-|     >= 0.5.0 && < 0.8.0     | >= 0.14.15       | >= 2.1 |
-|     <= 0.4.5                | ~> 0.12.0 *      | >= 1.9 |
+| fluent-plugin-cloudwatch-logs | fluentd     | ruby   |
+| ----------------------------- | ----------- | ------ |
+| >= 0.5.0                      | >= 0.14.15  | >= 2.1 |
+| <= 0.4.5                      | ~> 0.12.0 * | >= 1.9 |
 
 * May not support all future fluentd features
 
@@ -224,8 +223,7 @@ Please refer to [the PutRetentionPolicy column in documentation](https://docs.aw
 </source>
 ```
 
-* `aws_key_id`: AWS Access Key.  See [Authentication](#authentication) for more information.
-* `aws_sec_key`: AWS Secret Access Key.  See [Authentication](#authentication) for more information.
+* `add_log_group_name`: adds the log_group_name to the record with key `log_group_name_key` (default: `false`)
 * `aws_sts_role_arn`: the role ARN to assume when using cross-account sts authentication
 * `aws_sts_session_name`: the session name to use with sts authentication (default: `fluentd`)
 * `aws_use_sts`: use [AssumeRoleCredentials](http://docs.aws.amazon.com/sdkforruby/api/Aws/AssumeRoleCredentials.html) to authenticate, rather than the [default credential hierarchy](http://docs.aws.amazon.com/sdkforruby/api/Aws/CloudWatchLogs/Client.html#initialize-instance_method). See 'Cross-Account Operation' below for more detail.
@@ -234,13 +232,15 @@ Please refer to [the PutRetentionPolicy column in documentation](https://docs.aw
 * `http_proxy`: use to set an optional HTTP proxy
 * `json_handler`:  name of the library to be used to handle JSON data. For now, supported libraries are `json` (default) and `yajl`.
 * `log_group_name`: name of log group to fetch logs
+* `log_group_name_key`: key to use when `add_log_group_name` is set (default: `log_group`)
 * `log_stream_name`: name of log stream to fetch logs
 * `region`: AWS Region.  See [Authentication](#authentication) for more information.
 * `throttling_retry_seconds`: time period in seconds to retry a request when aws CloudWatch rate limit exceeds (default: nil)
 * `include_metadata`: include metadata such as `log_group_name` and `log_stream_name`. (default: false)
 * `state_file`: file to store current state (e.g. next\_forward\_token). This parameter is deprecated. Use `<storage>` instead.
 * `tag`: fluentd tag
-* `use_log_stream_name_prefix`: to use `log_stream_name` as log stream name prefix (default false)
+* `use_log_group_name_prefix`: to use `log_group_name` as log group name prefix (default `false`)
+* `use_log_stream_name_prefix`: to use `log_stream_name` as log stream name prefix (default `false`)
 * `use_todays_log_stream`: use todays and yesterdays date as log stream name prefix (formatted YYYY/MM/DD). (default: `false`)
 * `use_aws_timestamp`: get timestamp from Cloudwatch event for non json logs, otherwise fluentd will parse the log to get the timestamp (default `false`)
 * `start_time`: specify starting time range for obtaining logs. (default: `nil`)
