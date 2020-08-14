@@ -98,7 +98,7 @@ module Fluent::Plugin
     end
 
     def store_next_token(token, log_group_name, log_stream_name)
-      open(state_file_for(log_group_name, log_stream_name), 'w') do |f|
+      File.open(state_file_for(log_group_name, log_stream_name), 'w') do |f|
         f.write token
       end
     end
@@ -155,12 +155,13 @@ module Fluent::Plugin
           router.emit(@tag, time, record)
         }
       else
+        record = @json_handler.load(event.message)
+        time = (event.timestamp / 1000).floor
+
         if @add_log_group_name
           record[@log_group_name_key] = group
         end
 
-        time = (event.timestamp / 1000).floor
-        record = @json_handler.load(event.message)
         router.emit(@tag, time, record)
       end
     end
