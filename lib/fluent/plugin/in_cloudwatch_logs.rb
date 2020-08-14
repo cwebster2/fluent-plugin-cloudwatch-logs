@@ -155,7 +155,8 @@ module Fluent::Plugin
           router.emit(@tag, time, record)
         }
       else
-        record = @json_handler.load(event.message)
+        record = {}
+        record["message"] = event.message
         time = (event.timestamp / 1000).floor
 
         if @add_log_group_name
